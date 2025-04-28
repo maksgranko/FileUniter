@@ -47,7 +47,7 @@ namespace FileUniter
                         {
                             try
                             {
-                                
+
                                 string content = File.ReadAllText(file);
                                 results.AppendLine($"\"{file}\":");
                                 results.AppendLine(separators);
@@ -226,10 +226,10 @@ namespace FileUniter
                             SearchSubdirectoriesForFile(dir, filePattern, true, resultFiles);
                         }
                     }
-                    catch (Exception) {}
+                    catch (Exception) { }
                 }
             }
-            catch (UnauthorizedAccessException) {}
+            catch (UnauthorizedAccessException) { }
             catch (DirectoryNotFoundException) { }
         }
     }
