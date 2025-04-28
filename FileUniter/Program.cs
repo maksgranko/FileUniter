@@ -1,14 +1,20 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 
 namespace FileUniter
 {
     internal class Program
     {
+        // Кэш для хранения результатов поиска файлов
+        private static readonly ConcurrentDictionary<string, string[]> _fileCache = new ConcurrentDictionary<string, string[]>();
+
         [DllImport("user32.dll")]
         internal static extern bool OpenClipboard(IntPtr hWndNewOwner);
 
@@ -47,7 +53,6 @@ namespace FileUniter
                         {
                             try
                             {
-
                                 string content = File.ReadAllText(file);
                                 results.AppendLine($"\"{file}\":");
                                 results.AppendLine(separators);
@@ -103,12 +108,20 @@ namespace FileUniter
         {
             try
             {
-                string normalizedPath = path.Replace('\\', '/');
-                normalizedPath = Regex.Replace(normalizedPath, "//", "/");
+                // Проверяем, есть ли результат в кэше
+                string cacheKey = $"{path}|{recursive}";
+                if (_fileCache.TryGetValue(cacheKey, out string[] cachedResult))
+                {
+                    return cachedResult;
+                }
 
+                // Нормализуем путь за одну операцию
+                string normalizedPath = Regex.Replace(path.Replace('\\', '/'), "//+", "/");
+
+                string[] result;
                 if (normalizedPath.Contains("/*/"))
                 {
-                    return SearchFilesInAllSubdirectories(normalizedPath, recursive);
+                    result = SearchFilesInAllSubdirectories(normalizedPath, recursive);
                 }
                 else if (path.Contains("*"))
                 {
@@ -129,18 +142,26 @@ namespace FileUniter
 
                     if (!Directory.Exists(directory))
                     {
-                        return Array.Empty<string>();
+                        result = Array.Empty<string>();
                     }
+                    else
+                    {
+                        result = Directory.GetFiles(directory, pattern,
+                            recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);
+                    }
+                }
+                else
+                {
+                    string dir = Path.GetDirectoryName(path) ?? Directory.GetCurrentDirectory();
+                    string pat = Path.GetFileName(path) ?? "*";
 
-                    return Directory.GetFiles(directory, pattern,
+                    result = Directory.GetFiles(dir, pat,
                         recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);
                 }
 
-                string dir = Path.GetDirectoryName(path) ?? Directory.GetCurrentDirectory();
-                string pat = Path.GetFileName(path) ?? "*";
-
-                return Directory.GetFiles(dir, pat,
-                    recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);
+                // Сохраняем результат в кэш
+                _fileCache[cacheKey] = result;
+                return result;
             }
             catch (Exception ex)
             {
@@ -158,35 +179,42 @@ namespace FileUniter
                     return Array.Empty<string>();
                 }
 
-                string baseDir = parts[0];
-                string filePattern = parts[1];
+                string baseDir = parts[0].Replace('/', Path.DirectorySeparatorChar);
+                string filePattern = parts[1].Replace('/', Path.DirectorySeparatorChar);
 
-                baseDir = baseDir.Replace('/', Path.DirectorySeparatorChar);
-                filePattern = filePattern.Replace('/', Path.DirectorySeparatorChar);
-
-                List<string> resultFiles = new List<string>();
-
-                if (Directory.Exists(baseDir))
+                if (!Directory.Exists(baseDir))
                 {
-                    string[] subdirectories = Directory.GetDirectories(baseDir);
+                    return Array.Empty<string>();
+                }
 
-                    foreach (string dir in subdirectories)
+                string[] subdirectories = Directory.GetDirectories(baseDir);
+
+                // Используем параллельную обработку для поиска файлов
+                ConcurrentBag<string> resultFiles = new ConcurrentBag<string>();
+
+                Parallel.ForEach(subdirectories, dir =>
+                {
+                    try
                     {
-                        try
-                        {
-                            string searchDir = Path.GetDirectoryName(Path.Combine(dir, filePattern)) ?? dir;
-                            string searchPattern = Path.GetFileName(filePattern) ?? "*";
+                        string searchDir = Path.GetDirectoryName(Path.Combine(dir, filePattern)) ?? dir;
+                        string searchPattern = Path.GetFileName(filePattern) ?? "*";
 
+                        if (Directory.Exists(searchDir))
+                        {
                             string[] files = Directory.GetFiles(searchDir, searchPattern,
                                 recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);
 
-                            resultFiles.AddRange(files);
-                        }
-                        catch (Exception)
-                        {
+                            foreach (string file in files)
+                            {
+                                resultFiles.Add(file);
+                            }
                         }
                     }
-                }
+                    catch (Exception)
+                    {
+                        // Пропускаем директории с ошибками
+                    }
+                });
 
                 return resultFiles.ToArray();
             }
@@ -194,43 +222,6 @@ namespace FileUniter
             {
                 throw new Exception($"Ошибка обработки пути {normalizedPath}: {ex.Message}");
             }
-        }
-
-        static void SearchSubdirectoriesForFile(string baseDir, string filePattern, bool recursive, List<string> resultFiles)
-        {
-            try
-            {
-                string[] directories = Directory.GetDirectories(baseDir);
-                foreach (string dir in directories)
-                {
-                    try
-                    {
-                        string searchDir = dir;
-                        string searchPattern = filePattern;
-
-                        if (filePattern.Contains(Path.DirectorySeparatorChar.ToString()))
-                        {
-                            string patternDir = Path.GetDirectoryName(filePattern);
-                            searchDir = Path.Combine(dir, patternDir);
-                            searchPattern = Path.GetFileName(filePattern);
-                        }
-
-                        if (Directory.Exists(searchDir))
-                        {
-                            string[] files = Directory.GetFiles(searchDir, searchPattern);
-                            resultFiles.AddRange(files);
-                        }
-
-                        if (recursive)
-                        {
-                            SearchSubdirectoriesForFile(dir, filePattern, true, resultFiles);
-                        }
-                    }
-                    catch (Exception) { }
-                }
-            }
-            catch (UnauthorizedAccessException) { }
-            catch (DirectoryNotFoundException) { }
         }
     }
 }
